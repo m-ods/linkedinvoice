@@ -13,7 +13,7 @@ const wss = new WebSocketServer({ server, path: "/ws" });
 const PORT = parseInt(process.env.PORT || "3001", 10);
 const ASSEMBLYAI_API_KEY = process.env.ASSEMBLYAI_API_KEY || "";
 const ASSEMBLYAI_WS_URL =
-  "wss://agents.assemblyai.com/v1/voice";
+  "wss://agents.assemblyai.com/v1/realtime";
 
 if (!ASSEMBLYAI_API_KEY) {
   console.error(
