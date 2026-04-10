@@ -1,5 +1,6 @@
 import express from "express";
 import { createServer } from "http";
+import https from "https";
 import { WebSocketServer, WebSocket } from "ws";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -16,8 +17,12 @@ const ASSEMBLYAI_WS_URL =
   "wss://speech-to-speech.us.assemblyai.com/v1/realtime";
 
 if (!ASSEMBLYAI_API_KEY) {
-  console.warn(
-    "⚠️  ASSEMBLYAI_API_KEY not set. Voice agent will not work without it."
+  console.error(
+    "ASSEMBLYAI_API_KEY is not set. Voice agent will not work."
+  );
+} else {
+  console.log(
+    `ASSEMBLYAI_API_KEY is set (${ASSEMBLYAI_API_KEY.length} chars, starts with ${ASSEMBLYAI_API_KEY.slice(0, 4)}...)`
   );
 }
 
@@ -46,6 +51,12 @@ Topic: "${topic}"
 After presenting the post via the tool, ask the user if they'd like any changes.`;
 }
 
+// Create a reusable HTTPS agent for outbound WebSocket connections
+const agent = new https.Agent({
+  keepAlive: true,
+  timeout: 15000,
+});
+
 wss.on("connection", (browserWs, req) => {
   const url = new URL(req.url || "/", `http://${req.headers.host}`);
   const topic = decodeURIComponent(url.searchParams.get("topic") || "");
@@ -58,23 +69,40 @@ wss.on("connection", (browserWs, req) => {
     return;
   }
 
+  if (!ASSEMBLYAI_API_KEY) {
+    browserWs.send(
+      JSON.stringify({
+        type: "error",
+        message: "Server is missing ASSEMBLYAI_API_KEY configuration.",
+      })
+    );
+    browserWs.close();
+    return;
+  }
+
   console.log(`[ws] New connection — topic: "${topic}"`);
+  console.log(`[assemblyai] Connecting to ${ASSEMBLYAI_WS_URL}...`);
 
   let assemblyWs: WebSocket | null = null;
   let sessionReady = false;
 
-  // Connect to AssemblyAI
+  // Connect to AssemblyAI with explicit agent and options
   assemblyWs = new WebSocket(ASSEMBLYAI_WS_URL, {
     headers: {
       Authorization: `Bearer ${ASSEMBLYAI_API_KEY}`,
     },
+    agent,
+    handshakeTimeout: 15000,
+    perMessageDeflate: false,
   });
 
   assemblyWs.on("open", () => {
-    console.log("[assemblyai] Connected");
+    console.log("[assemblyai] Connected successfully");
   });
 
   assemblyWs.on("message", (data) => {
+    if (browserWs.readyState !== WebSocket.OPEN) return;
+
     const msg = JSON.parse(data.toString());
 
     switch (msg.type) {
@@ -131,7 +159,6 @@ wss.on("connection", (browserWs, req) => {
         break;
 
       case "reply.audio":
-        // Forward audio chunks to browser for playback
         browserWs.send(JSON.stringify(msg));
         break;
 
@@ -156,7 +183,6 @@ wss.on("connection", (browserWs, req) => {
         console.log("[assemblyai] Tool call:", msg.name, msg.args);
 
         if (msg.name === "generate_post") {
-          // Send the generated post to the browser for display
           browserWs.send(
             JSON.stringify({
               type: "linkedin_post",
@@ -165,7 +191,6 @@ wss.on("connection", (browserWs, req) => {
             })
           );
 
-          // Queue tool result for reply.done
           pendingToolCalls.push({
             type: "tool.result",
             call_id: msg.call_id,
@@ -181,7 +206,6 @@ wss.on("connection", (browserWs, req) => {
       case "transcript.user":
       case "transcript.user.delta":
       case "transcript.agent":
-        // Forward transcripts to browser
         browserWs.send(JSON.stringify(msg));
         break;
 
@@ -196,7 +220,7 @@ wss.on("connection", (browserWs, req) => {
         break;
 
       default:
-        // Forward any other messages
+        console.log("[assemblyai] Unknown message type:", msg.type);
         browserWs.send(JSON.stringify(msg));
     }
   });
@@ -207,20 +231,41 @@ wss.on("connection", (browserWs, req) => {
     result: string;
   }> = [];
 
+  assemblyWs.on("unexpected-response", (_req, res) => {
+    let body = "";
+    res.on("data", (chunk: Buffer) => {
+      body += chunk.toString();
+    });
+    res.on("end", () => {
+      console.error(
+        `[assemblyai] Unexpected response: ${res.statusCode} ${res.statusMessage} — ${body}`
+      );
+      if (browserWs.readyState === WebSocket.OPEN) {
+        browserWs.send(
+          JSON.stringify({
+            type: "error",
+            message: `AssemblyAI returned ${res.statusCode}: ${body || res.statusMessage}`,
+          })
+        );
+      }
+    });
+  });
+
   assemblyWs.on("error", (err) => {
     console.error("[assemblyai] WebSocket error:", err.message);
-    browserWs.send(
-      JSON.stringify({
-        type: "error",
-        message: "Voice agent connection failed. Check your API key.",
-      })
-    );
+    console.error("[assemblyai] Error details:", err);
+    if (browserWs.readyState === WebSocket.OPEN) {
+      browserWs.send(
+        JSON.stringify({
+          type: "error",
+          message: `Voice agent connection failed: ${err.message}`,
+        })
+      );
+    }
   });
 
   assemblyWs.on("close", (code, reason) => {
-    console.log(
-      `[assemblyai] Closed: ${code} ${reason.toString()}`
-    );
+    console.log(`[assemblyai] Closed: ${code} ${reason.toString()}`);
     if (browserWs.readyState === WebSocket.OPEN) {
       browserWs.send(JSON.stringify({ type: "session.closed" }));
       browserWs.close();
@@ -234,7 +279,6 @@ wss.on("connection", (browserWs, req) => {
     const msg = JSON.parse(data.toString());
 
     if (msg.type === "input.audio" && sessionReady) {
-      // Forward audio to AssemblyAI
       assemblyWs.send(JSON.stringify(msg));
     }
   });
@@ -247,7 +291,15 @@ wss.on("connection", (browserWs, req) => {
   });
 });
 
-// In production, serve the built frontend
+// Health check
+app.get("/health", (_req, res) => {
+  res.json({
+    status: "ok",
+    apiKeySet: !!ASSEMBLYAI_API_KEY,
+  });
+});
+
+// Serve the built frontend
 const distPath = path.resolve(__dirname, "../dist");
 app.use(express.static(distPath));
 app.get("/{*splat}", (_req, res) => {
@@ -255,5 +307,5 @@ app.get("/{*splat}", (_req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`🎙️  LinkedIn Voice server running on port ${PORT}`);
+  console.log(`LinkedIn Voice server running on port ${PORT}`);
 });
