@@ -1,6 +1,5 @@
 import express from "express";
 import { createServer } from "http";
-import https from "https";
 import { WebSocketServer, WebSocket } from "ws";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -51,11 +50,6 @@ Topic: "${topic}"
 After presenting the post via the tool, ask the user if they'd like any changes.`;
 }
 
-// Create a reusable HTTPS agent for outbound WebSocket connections
-const agent = new https.Agent({
-  keepAlive: true,
-  timeout: 15000,
-});
 
 wss.on("connection", (browserWs, req) => {
   const url = new URL(req.url || "/", `http://${req.headers.host}`);
@@ -86,14 +80,14 @@ wss.on("connection", (browserWs, req) => {
   let assemblyWs: WebSocket | null = null;
   let sessionReady = false;
 
-  // Connect to AssemblyAI with explicit agent and options
+  // Connect to AssemblyAI
   assemblyWs = new WebSocket(ASSEMBLYAI_WS_URL, {
     headers: {
       Authorization: `Bearer ${ASSEMBLYAI_API_KEY}`,
     },
-    agent,
     handshakeTimeout: 15000,
     perMessageDeflate: false,
+    followRedirects: true,
   });
 
   assemblyWs.on("open", () => {
@@ -297,6 +291,80 @@ app.get("/health", (_req, res) => {
     status: "ok",
     apiKeySet: !!ASSEMBLYAI_API_KEY,
   });
+});
+
+// Connectivity diagnostic — tests HTTPS + DNS to AssemblyAI, then a quick WS handshake
+app.get("/debug/connectivity", async (_req, res) => {
+  const results: Record<string, unknown> = {};
+
+  // 1. DNS resolve
+  const dns = await import("dns");
+  try {
+    const addrs = await dns.promises.resolve4(
+      "speech-to-speech.us.assemblyai.com"
+    );
+    results.dns = { ok: true, addresses: addrs };
+  } catch (err: unknown) {
+    results.dns = { ok: false, error: (err as Error).message };
+  }
+
+  // 2. HTTPS GET to the base host
+  try {
+    const resp = await fetch(
+      "https://speech-to-speech.us.assemblyai.com/v1/realtime",
+      {
+        method: "GET",
+        headers: { Authorization: `Bearer ${ASSEMBLYAI_API_KEY}` },
+        signal: AbortSignal.timeout(10000),
+      }
+    );
+    results.https = {
+      ok: true,
+      status: resp.status,
+      statusText: resp.statusText,
+    };
+  } catch (err: unknown) {
+    results.https = { ok: false, error: (err as Error).message };
+  }
+
+  // 3. Quick WS connection test
+  try {
+    const testResult = await new Promise<Record<string, unknown>>(
+      (resolve) => {
+        const ws = new WebSocket(ASSEMBLYAI_WS_URL, {
+          headers: { Authorization: `Bearer ${ASSEMBLYAI_API_KEY}` },
+          handshakeTimeout: 10000,
+          perMessageDeflate: false,
+          followRedirects: true,
+        });
+        const timer = setTimeout(() => {
+          ws.close();
+          resolve({ ok: false, error: "timeout after 10s" });
+        }, 10000);
+        ws.on("open", () => {
+          clearTimeout(timer);
+          ws.close();
+          resolve({ ok: true });
+        });
+        ws.on("unexpected-response", (_r, resp) => {
+          clearTimeout(timer);
+          resolve({
+            ok: false,
+            error: `HTTP ${resp.statusCode} ${resp.statusMessage}`,
+          });
+        });
+        ws.on("error", (err) => {
+          clearTimeout(timer);
+          resolve({ ok: false, error: err.message });
+        });
+      }
+    );
+    results.websocket = testResult;
+  } catch (err: unknown) {
+    results.websocket = { ok: false, error: (err as Error).message };
+  }
+
+  res.json(results);
 });
 
 // Serve the built frontend
