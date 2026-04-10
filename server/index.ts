@@ -13,7 +13,7 @@ const wss = new WebSocketServer({ server, path: "/ws" });
 const PORT = parseInt(process.env.PORT || "3001", 10);
 const ASSEMBLYAI_API_KEY = process.env.ASSEMBLYAI_API_KEY || "";
 const ASSEMBLYAI_WS_URL =
-  "wss://speech-to-speech.us.assemblyai.com/v1/realtime";
+  "wss://agents.assemblyai.com/v1/voice";
 
 if (!ASSEMBLYAI_API_KEY) {
   console.error(
@@ -293,41 +293,92 @@ app.get("/health", (_req, res) => {
   });
 });
 
-// Connectivity diagnostic — tests HTTPS + DNS to AssemblyAI, then a quick WS handshake
+// Connectivity diagnostic
 app.get("/debug/connectivity", async (_req, res) => {
   const results: Record<string, unknown> = {};
+  const HOST = "speech-to-speech.us.assemblyai.com";
 
   // 1. DNS resolve
   const dns = await import("dns");
   try {
-    const addrs = await dns.promises.resolve4(
-      "speech-to-speech.us.assemblyai.com"
-    );
+    const addrs = await dns.promises.resolve4(HOST);
     results.dns = { ok: true, addresses: addrs };
   } catch (err: unknown) {
     results.dns = { ok: false, error: (err as Error).message };
   }
 
-  // 2. HTTPS GET to the base host
+  // 2. Raw TLS connection test
+  const tls = await import("tls");
+  const net = await import("net");
   try {
-    const resp = await fetch(
-      "https://speech-to-speech.us.assemblyai.com/v1/realtime",
-      {
-        method: "GET",
-        headers: { Authorization: `Bearer ${ASSEMBLYAI_API_KEY}` },
-        signal: AbortSignal.timeout(10000),
+    const tlsResult = await new Promise<Record<string, unknown>>(
+      (resolve) => {
+        const socket = net.connect({ host: HOST, port: 443 }, () => {
+          const tlsSocket = tls.connect(
+            {
+              socket,
+              servername: HOST,
+              minVersion: "TLSv1.2",
+            },
+            () => {
+              resolve({
+                ok: true,
+                protocol: tlsSocket.getProtocol(),
+                cipher: tlsSocket.getCipher(),
+                authorized: tlsSocket.authorized,
+                peerCert: {
+                  subject: tlsSocket.getPeerCertificate()?.subject,
+                  issuer: tlsSocket.getPeerCertificate()?.issuer,
+                },
+              });
+              tlsSocket.destroy();
+            }
+          );
+          tlsSocket.on("error", (err) => {
+            resolve({ ok: false, stage: "tls", error: err.message });
+          });
+          const timer = setTimeout(() => {
+            tlsSocket.destroy();
+            resolve({ ok: false, stage: "tls", error: "timeout 10s" });
+          }, 10000);
+          tlsSocket.on("close", () => clearTimeout(timer));
+        });
+        socket.on("error", (err) => {
+          resolve({ ok: false, stage: "tcp", error: err.message });
+        });
+        setTimeout(() => {
+          socket.destroy();
+        }, 12000);
       }
     );
+    results.tls = tlsResult;
+  } catch (err: unknown) {
+    results.tls = { ok: false, error: (err as Error).message };
+  }
+
+  // 3. HTTPS fetch with cause chain
+  try {
+    const resp = await fetch(`https://${HOST}/v1/realtime`, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${ASSEMBLYAI_API_KEY}` },
+      signal: AbortSignal.timeout(10000),
+    });
     results.https = {
       ok: true,
       status: resp.status,
       statusText: resp.statusText,
     };
   } catch (err: unknown) {
-    results.https = { ok: false, error: (err as Error).message };
+    const e = err as Error & { cause?: Error };
+    results.https = {
+      ok: false,
+      error: e.message,
+      cause: e.cause?.message,
+      causeCode: (e.cause as NodeJS.ErrnoException | undefined)?.code,
+    };
   }
 
-  // 3. Quick WS connection test
+  // 4. WebSocket test
   try {
     const testResult = await new Promise<Record<string, unknown>>(
       (resolve) => {
@@ -355,7 +406,11 @@ app.get("/debug/connectivity", async (_req, res) => {
         });
         ws.on("error", (err) => {
           clearTimeout(timer);
-          resolve({ ok: false, error: err.message });
+          resolve({
+            ok: false,
+            error: err.message,
+            code: (err as NodeJS.ErrnoException).code,
+          });
         });
       }
     );
@@ -363,6 +418,25 @@ app.get("/debug/connectivity", async (_req, res) => {
   } catch (err: unknown) {
     results.websocket = { ok: false, error: (err as Error).message };
   }
+
+  // 5. Control test — can we TLS to any host?
+  try {
+    const resp = await fetch("https://api.assemblyai.com/v2", {
+      method: "GET",
+      headers: { Authorization: ASSEMBLYAI_API_KEY },
+      signal: AbortSignal.timeout(10000),
+    });
+    results.control = {
+      ok: true,
+      status: resp.status,
+      statusText: resp.statusText,
+    };
+  } catch (err: unknown) {
+    const e = err as Error & { cause?: Error };
+    results.control = { ok: false, error: e.message, cause: e.cause?.message };
+  }
+
+  results.nodeVersion = process.version;
 
   res.json(results);
 });
