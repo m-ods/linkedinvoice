@@ -250,7 +250,7 @@ wss.on("connection", (browserWs, req) => {
 // In production, serve the built frontend
 const distPath = path.resolve(__dirname, "../dist");
 app.use(express.static(distPath));
-app.get("*", (_req, res) => {
+app.get("/{*splat}", (_req, res) => {
   res.sendFile(path.join(distPath, "index.html"));
 });
 
