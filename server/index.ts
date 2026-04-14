@@ -124,9 +124,13 @@ wss.on("connection", (browserWs, req) => {
           },
         ],
         turn_detection: {
-          min_end_of_turn_silence_ms: 200,
-          max_turn_silence_ms: 1500,
+          speech_detection_threshold: 0.3,
+          prefix_padding_ms: 300,
+          min_end_of_turn_silence_ms: 100,
+          max_turn_silence_ms: 1000,
           interrupt_response: true,
+          min_interrupt_duration_ms: 600,
+          min_interrupt_words: 0,
         },
       },
     };
