@@ -91,7 +91,46 @@ wss.on("connection", (browserWs, req) => {
   });
 
   assemblyWs.on("open", () => {
-    console.log("[assemblyai] Connected successfully");
+    console.log("[assemblyai] Connected — sending session config...");
+
+    // Must send session.update BEFORE session.ready fires
+    const sessionConfig = {
+      type: "session.update",
+      session: {
+        system_prompt: buildSystemPrompt(topic),
+        greeting: `Hi there! I'm excited to help you craft a LinkedIn post about "${topic}". I'll ask you a few questions to understand your perspective, and then I'll write a polished post for you. Ready to get started?`,
+        tools: [
+          {
+            type: "function",
+            name: "generate_post",
+            description:
+              "Generate the final LinkedIn post based on the interview. Call this when you have gathered enough information from the user (after 3-4 questions).",
+            parameters: {
+              type: "object",
+              properties: {
+                post_content: {
+                  type: "string",
+                  description:
+                    "The full LinkedIn post content, formatted and ready to publish",
+                },
+                hook: {
+                  type: "string",
+                  description:
+                    "The opening hook line of the post (first sentence)",
+                },
+              },
+              required: ["post_content", "hook"],
+            },
+          },
+        ],
+        turn_detection: {
+          min_end_of_turn_silence_ms: 200,
+          max_turn_silence_ms: 1500,
+          interrupt_response: true,
+        },
+      },
+    };
+    assemblyWs!.send(JSON.stringify(sessionConfig));
   });
 
   assemblyWs.on("message", (data) => {
@@ -103,47 +142,6 @@ wss.on("connection", (browserWs, req) => {
       case "session.ready":
         console.log("[assemblyai] Session ready:", msg.session_id);
         sessionReady = true;
-
-        // Configure the session with our interviewer prompt and tool
-        const sessionConfig = {
-          type: "session.update",
-          session: {
-            system_prompt: buildSystemPrompt(topic),
-            greeting: `Hi there! I'm excited to help you craft a LinkedIn post about "${topic}". I'll ask you a few questions to understand your perspective, and then I'll write a polished post for you. Ready to get started?`,
-            tools: [
-              {
-                type: "function",
-                name: "generate_post",
-                description:
-                  "Generate the final LinkedIn post based on the interview. Call this when you have gathered enough information from the user (after 3-4 questions).",
-                parameters: {
-                  type: "object",
-                  properties: {
-                    post_content: {
-                      type: "string",
-                      description:
-                        "The full LinkedIn post content, formatted and ready to publish",
-                    },
-                    hook: {
-                      type: "string",
-                      description:
-                        "The opening hook line of the post (first sentence)",
-                    },
-                  },
-                  required: ["post_content", "hook"],
-                },
-              },
-            ],
-            turn_detection: {
-              min_end_of_turn_silence_ms: 200,
-              max_turn_silence_ms: 1500,
-              interrupt_response: true,
-            },
-          },
-        };
-        assemblyWs!.send(JSON.stringify(sessionConfig));
-
-        // Forward session.ready to browser
         browserWs.send(JSON.stringify(msg));
         break;
 
