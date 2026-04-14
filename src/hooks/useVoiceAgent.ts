@@ -111,16 +111,16 @@ export function useVoiceAgent(): UseVoiceAgentReturn {
             break;
 
           case "transcript.user.delta":
-            setCurrentUserTranscript(msg.transcript || msg.delta || "");
+            setCurrentUserTranscript(msg.text || msg.transcript || msg.delta || "");
             break;
 
           case "transcript.user":
             // Final user transcript
-            if (msg.transcript) {
+            if (msg.text || msg.transcript) {
               const id = `user-${++transcriptIdRef.current}`;
               setTranscripts((prev) => [
                 ...prev,
-                { role: "user", text: msg.transcript, id },
+                { role: "user", text: msg.text || msg.transcript, id },
               ]);
             }
             setCurrentUserTranscript("");
@@ -131,15 +131,16 @@ export function useVoiceAgent(): UseVoiceAgentReturn {
             break;
 
           case "reply.audio":
-            player.enqueue(msg.audio);
+            // AssemblyAI sends audio as "data", not "audio"
+            player.enqueue(msg.data || msg.audio);
             break;
 
           case "transcript.agent":
-            if (msg.transcript) {
+            if (msg.text || msg.transcript) {
               const id = `agent-${++transcriptIdRef.current}`;
               setTranscripts((prev) => [
                 ...prev,
-                { role: "agent", text: msg.transcript, id },
+                { role: "agent", text: msg.text || msg.transcript, id },
               ]);
             }
             break;
